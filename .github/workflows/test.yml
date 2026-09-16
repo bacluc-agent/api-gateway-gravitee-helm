@@ -1,49 +1,79 @@
-name: test
+name: Build and deploy to test
 "on":
-  push: {}
+  push:
+    branches:
+      - '**'
   workflow_dispatch: {}
 
 env:
   KUBECONFIG: /tmp/github-ci.kubeconfig
+  NAMESPACE: gravitee-test
+  # Prefix filter for vars/secrets: "" passes everything through;
+  # a non-empty value (e.g. "GRAVITEE_") keeps only matching keys and strips the prefix.
+  FILTER_PREFIX: ""
 
 jobs:
-  test:
+  build:
     environment: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-        with:
-          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_TEST }}
 
-      - env:
-          NEWLINE: |2+
-
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-
-        name: Helm Chart preview
+      - name: Start Minikube
         run: |
-          jq -n '.env=(env | with_entries(select(.key | startswith("KUBECONFIG_") | not)))' > ${PWD}/env.yaml
-          jq 'select(.!=null)|{vars:.,env:.}' > "${PWD}/vars.yaml" <<'EOF' ${{ env.NEWLINE }}${{ toJson(vars) }}${{ env.NEWLINE }}EOF
-          jq 'select(.!=null)|{secrets:.,env:.}' > "${PWD}/secrets.yaml" <<'EOF' ${{ env.NEWLINE }}${{ toJson(secrets) }}${{ env.NEWLINE }}EOF
+          minikube start --profile k8s-ci --driver=docker
+          minikube addons enable ingress
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-          cp "${KUBECONFIG}" ".github-ci.kubeconfig"
-           docker run --user root -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update /data; HELM_DIFF_USE_UPGRADE_DRY_RUN=true /bin/helm diff upgrade 'gravitee-test' /data --namespace '${NAMESPACE}' --values "/data/values.yaml" --values "/data/values.secret.example.yaml" --values "/data/env.yaml" --values /data/vars.yaml --values /data/secrets.yaml --kubeconfig /tmp/github-ci.kubeconfig --allow-unreleased"
-
-      - env:
-          NEWLINE: |2+
-
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-
-        name: Helm Chart deploy
+      - name: Flatten kubeconfig for Helm
         run: |
-          jq -n '.env=(env | with_entries(select(.key | startswith("KUBECONFIG_") | not)))' > ${PWD}/env.yaml
-          jq 'select(.!=null)|{vars:.,env:.}' > "${PWD}/vars.yaml" <<'EOF' ${{ env.NEWLINE }}${{ toJson(vars) }}${{ env.NEWLINE }}EOF
-          jq 'select(.!=null)|{secrets:.,env:.}' > "${PWD}/secrets.yaml" <<'EOF' ${{ env.NEWLINE }}${{ toJson(secrets) }}${{ env.NEWLINE }}EOF
+          kubectl config view --minify --flatten > "${KUBECONFIG}.tmp"
+          mv "${KUBECONFIG}.tmp" "${KUBECONFIG}"
 
+      - name: Prepare helm values
+        env:
+          SECRETS_JSON: "${{ toJson(secrets) }}"
+          VARS_JSON: "${{ toJson(vars) }}"
+        run: |
+          set -euo pipefail
+
+          # 1. ENV_JSON: all process env vars except KUBECONFIG_*
+          ENV_JSON=$(jq -n 'env | with_entries(select(.key | startswith("KUBECONFIG_") | not))')
+
+          # 2. Prefix filter machinery. FILTER_PREFIX="" (default) passes everything
+          #    through unchanged; a non-empty prefix keeps only keys starting with it
+          #    and strips the prefix so the chart sees clean names.
+          if [ -n "${FILTER_PREFIX}" ]; then
+            FILTER_JQ="with_entries(select(.key | startswith(\"${FILTER_PREFIX}\")) | .key |= ltrimstr(\"${FILTER_PREFIX}\"))"
+          else
+            FILTER_JQ="."
+          fi
+
+          # 3. Build the three values files. The chart reads .Values.env.*, so
+          #    vars.yaml and secrets.yaml also carry an `env:` key with the same content.
+          jq -n --argjson e "${ENV_JSON}" '{env: $e}' > "${PWD}/env.yaml"
+          jq -n --argjson v "${VARS_JSON}" '{vars: ($v | '"${FILTER_JQ}"'), env: ($v | '"${FILTER_JQ}"')}' > "${PWD}/vars.yaml"
+          jq -n --argjson s "${SECRETS_JSON}" '{secrets: ($s | '"${FILTER_JQ}"'), env: ($s | '"${FILTER_JQ}"')}' > "${PWD}/secrets.yaml"
+
+          echo "── env.yaml keys ──"
+          jq '.env | keys' "${PWD}/env.yaml"
+          echo "── vars.yaml keys ──"
+          jq '.vars | keys' "${PWD}/vars.yaml"
+          echo "── secrets.yaml keys ──"
+          jq '.secrets | keys' "${PWD}/secrets.yaml"
+
+      - name: Helm Chart preview
+        run: |
           cp "${KUBECONFIG}" ".github-ci.kubeconfig"
-           docker run --user root -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update /data; /bin/helm upgrade --install 'gravitee-test' /data --namespace '${NAMESPACE}' --create-namespace --values "/data/values.yaml" --values "/data/values.secret.example.yaml" --values "/data/env.yaml" --values /data/vars.yaml --values /data/secrets.yaml --kubeconfig /tmp/github-ci.kubeconfig"
+          docker run --network host --user root -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update /data; HELM_DIFF_USE_UPGRADE_DRY_RUN=true /bin/helm diff upgrade 'gravitee-test' /data --namespace '${NAMESPACE}' --values '/data/values.yaml' --values '/data/values.secret.example.yaml' --values '/data/values-local.yaml' --values '/data/env.yaml' --values '/data/vars.yaml' --values '/data/secrets.yaml' --kubeconfig /tmp/github-ci.kubeconfig --allow-unreleased"
+
+      - name: Helm Chart deploy
+        run: |
+          cp "${KUBECONFIG}" ".github-ci.kubeconfig"
+          docker run --network host --user root -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update /data; /bin/helm upgrade --install 'gravitee-test' /data --namespace '${NAMESPACE}' --create-namespace --values '/data/values.yaml' --values '/data/values.secret.example.yaml' --values '/data/values-local.yaml' --values '/data/env.yaml' --values '/data/vars.yaml' --values '/data/secrets.yaml' --kubeconfig /tmp/github-ci.kubeconfig"
+
+      - name: Validate deployment
+        run: |
+          kubectl wait --for=condition=available deployment -l app.kubernetes.io/instance=gravitee-test -n "${NAMESPACE}" --timeout=300s
+          kubectl get pods -n "${NAMESPACE}"
+          kubectl get svc -n "${NAMESPACE}"
