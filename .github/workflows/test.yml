@@ -27,39 +27,25 @@ jobs:
           kubectl config view --minify --flatten > "${KUBECONFIG}.tmp"
           mv "${KUBECONFIG}.tmp" "${KUBECONFIG}"
 
-      # Single source of truth for env.yaml. vars/secrets JSON is transported
-      # via heredoc with QUOTED delimiter: GitHub substitutes the toJson
-      # expressions into the script text, and the quoted delimiter prevents ALL
-      # shell processing of the body — single quotes (toJson does not escape
-      # them), $, backticks, $(...), newlines, EOF all survive verbatim. The
-      # pretty-printed toJson output can never contain a bare delimiter line.
-      # The JSON never enters the process environment (no SECRETS_JSON /
-      # VARS_JSON env vars — GitHub would print all env inputs for the step).
+      # env.yaml is built from the APPFLOW_-prefixed step env vars directly.
+      # No secrets/vars JSON transport into the run script: GitHub prints the
+      # substituted script text to the step log AND GitHub's malicious-
+      # workflow guard flags the secrets-JSON pattern on public forks
+      # (holding the run action_required). The chart needs the unprefixed
+      # POSTGRES_PASSWORD / JWT_SECRET / ADMIN_PASSWORD keys — built here
+      # from the APPFLOW_-prefixed env vars (prefix stripped), values never
+      # printed.
       - name: Prepare helm values
         env:
-          # test environment has NO secrets/vars (verified via gh api) — the
+          # test environment has NO vars/secrets (verified via gh api); the
           # || fallbacks keep the render-time required guards satisfied with
           # zero secrets. Real values win when the environment is populated.
           APPFLOW_POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'ci-postgres-password' }}
           APPFLOW_JWT_SECRET: ${{ secrets.JWT_SECRET || 'ci-jwt-secret-change-me' }}
           APPFLOW_ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'ci-admin-password' }}
         run: |
-          cat > "${PWD}/vars.json" <<'JSONEOF'
-          ${{ toJson(vars) }}
-          JSONEOF
-          cat > "${PWD}/secrets.json" <<'JSONEOF'
-          ${{ toJson(secrets) }}
-          JSONEOF
-
           jq -n --arg p 'APPFLOW_' \
-            --slurpfile v vars.json \
-            --slurpfile s secrets.json \
-            '($v[0] // {}) as $vars |
-             ($s[0] // {}) as $secrets |
-             (env | with_entries(select(.key | startswith($p)))) as $envv |
-             (($envv + $vars + $secrets) | with_entries(select(.key | startswith($p)))) as $prefixed |
-             {env: ($prefixed + ($prefixed | with_entries(.key |= ltrimstr($p))))}' > "${PWD}/env.yaml"
-
+            '{env: (env | with_entries(select(.key | startswith($p))) | with_entries(.key |= ltrimstr($p)))}' > "${PWD}/env.yaml"
           echo "env keys (values not printed):"
           jq -r '.env | keys[]' "${PWD}/env.yaml"
 
