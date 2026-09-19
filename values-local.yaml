@@ -135,3 +135,7 @@ initJob:
   enabled: true # requires httpbun.enabled=true (creates /httpbun API)
 
 env: {}
+
+# CI/kind: no litellm upstream exists locally; disables the LITELLM_URL /
+# LITELLM_API_KEY render-time guards and the LITELLM_API init-job block.
+litellm_api_enabled: false

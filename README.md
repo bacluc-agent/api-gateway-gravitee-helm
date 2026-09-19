@@ -124,11 +124,14 @@ Kept 4 templates + 1 job. Skipped: custom gravitee.yml mount (use `gravitee.api.
 
 ## Deploy to test (CI)
 Every push runs `.github/workflows/test.yml` (`environment: test`): `helm diff`
-preview + `helm upgrade --install` of fixed release `gravitee-test` into the
-namespace from the `KUBECONFIG_TEST` kubeconfig context. Manual dispatch runs
-`.github/workflows/test-stop.yml`, which uninstalls it (shared
-release reset). Requires the `KUBECONFIG_TEST` secret on the `test` environment.
-`values-local.yaml` is never used in CI.
+preview + `helm upgrade --install` of fixed release `gravitee-test`. Manual
+dispatch runs `.github/workflows/test-stop.yml`, which uninstalls it (shared
+release reset).
+CI uses minikube (profile `k8s-ci`, nginx ingress) and deploys the fixed
+release `gravitee-test` into namespace `vshn-api-gateway-gravitee-test` with
+`values.yaml` + `values-local.yaml` + a generated `env.yaml` (APPFLOW_-prefixed
+env/vars/secrets, keys emitted with and without the prefix). `litellm_api_enabled`
+is disabled in CI via `values-local.yaml`.
 
 ## Kind
 Local kind users run `./deploy.sh` (fixed release `gravitee-test`, namespace
