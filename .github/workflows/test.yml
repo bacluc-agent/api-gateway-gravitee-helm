@@ -33,8 +33,8 @@ jobs:
       # workflow guard flags the secrets-JSON pattern on public forks
       # (holding the run action_required). The chart needs the unprefixed
       # POSTGRES_PASSWORD / JWT_SECRET / ADMIN_PASSWORD keys — built here
-      # from the APPFLOW_-prefixed env vars (prefix stripped), values never
-      # printed.
+      # from the APPFLOW_-prefixed env vars; keys are emitted with AND
+      # without the prefix, values never printed.
       - name: Prepare helm values
         env:
           # test environment has NO vars/secrets (verified via gh api); the
@@ -45,7 +45,7 @@ jobs:
           APPFLOW_ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'ci-admin-password' }}
         run: |
           jq -n --arg p 'APPFLOW_' \
-            '{env: (env | with_entries(select(.key | startswith($p))) | with_entries(.key |= ltrimstr($p)))}' > "${PWD}/env.yaml"
+            '{env: ((env | with_entries(select(.key | startswith($p)))) as $e | ($e + ($e | with_entries(.key |= ltrimstr($p)))))}' > "${PWD}/env.yaml"
           echo "env keys (values not printed):"
           jq -r '.env | keys[]' "${PWD}/env.yaml"
 
@@ -72,5 +72,5 @@ name: Build and deploy to test
 "on":
   push:
     branches:
-      - '**'
+      - "**"
   workflow_dispatch: {}
