@@ -52,13 +52,13 @@ jobs:
       - name: Helm Chart preview
         run: |
           cp "${KUBECONFIG}" ".github-ci.kubeconfig"
-          sudo chmod -R o+w $(printf '%s' "$PWD")
+          sudo chmod -R o+w "$PWD"
           docker run --network host -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update '/data'; HELM_DIFF_USE_UPGRADE_DRY_RUN=true /bin/helm diff upgrade 'gravitee-test' '/data' --namespace '${NAMESPACE}' --values '/data/values.yaml' --values '/data/values-local.yaml' --values '/data/env.yaml' --kubeconfig /tmp/github-ci.kubeconfig --allow-unreleased"
 
       - name: Helm Chart deploy
         run: |
           cp "${KUBECONFIG}" ".github-ci.kubeconfig"
-          sudo chmod -R o+w $(printf '%s' "$PWD")
+          sudo chmod -R o+w "$PWD"
           docker run --network host -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update '/data'; /bin/helm upgrade --install 'gravitee-test' '/data' --namespace '${NAMESPACE}' --create-namespace --timeout 10m --values '/data/values.yaml' --values '/data/values-local.yaml' --values '/data/env.yaml' --kubeconfig /tmp/github-ci.kubeconfig"
 
       - name: Validate deployment
