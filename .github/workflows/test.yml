@@ -46,8 +46,6 @@ jobs:
         run: |
           jq -n --arg p 'APPFLOW_' \
             '{env: ((env | with_entries(select(.key | startswith($p)))) as $e | ($e + ($e | with_entries(.key |= ltrimstr($p)))))}' > "${PWD}/env.yaml"
-          echo "env keys (values not printed):"
-          jq -r '.env | keys[]' "${PWD}/env.yaml"
 
       - name: Helm Chart preview
         run: |
