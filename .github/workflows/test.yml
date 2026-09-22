@@ -2,20 +2,24 @@ env:
   KUBECONFIG: /tmp/github-ci.kubeconfig
   REGISTRY: registry.cloudscale-lpg-2.appuio.cloud
   TEST_DOMAIN: apps.cloudscale-lpg-2.appuio.cloud
-  NAMESPACE: gravitee-test
-  # Prefix filter for vars/secrets: "" passes everything through;
-  # a non-empty value (e.g. "GRAVITEE_") keeps only matching keys and strips the prefix.
-  FILTER_PREFIX: "APPFLOW_"
+  # MUST equal the namespace in the kubernetes:// URIs (values.yaml:189/198/202)
+  # and deploy.sh:4 — the URIs are rendered verbatim into the API ConfigMap and
+  # resolved at boot via a namespace-scoped Role (secrets get/list/watch in the
+  # release namespace only).
+  NAMESPACE: vshn-api-gateway-gravitee-test
 jobs:
   build:
     environment: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Start Minikube
         run: |
           minikube start --profile k8s-ci --driver=docker
-          minikube addons enable ingress
+          # --profile k8s-ci is REQUIRED: without it the addon command targets
+          # the default profile "minikube" and exits 85 (profile not found).
+          minikube addons enable ingress --profile k8s-ci
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Flatten kubeconfig for Helm
@@ -23,56 +27,42 @@ jobs:
           kubectl config view --minify --flatten > "${KUBECONFIG}.tmp"
           mv "${KUBECONFIG}.tmp" "${KUBECONFIG}"
 
-
-      - env:
-          NEWLINE: |2+
-
-          SECRETS_JSON: "${{ toJson(secrets) }}"
-          VARS_JSON: "${{ toJson(vars) }}"
-
-          APPFLOW_POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          APPFLOW_JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          APPFLOW_ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-        name: Helm Chart preview
+      # env.yaml is built from the APPFLOW_-prefixed step env vars directly.
+      # No secrets/vars JSON transport into the run script: GitHub prints the
+      # substituted script text to the step log AND GitHub's malicious-
+      # workflow guard flags the secrets-JSON pattern on public forks
+      # (holding the run action_required). The chart needs the unprefixed
+      # POSTGRES_PASSWORD / JWT_SECRET / ADMIN_PASSWORD keys — built here
+      # from the APPFLOW_-prefixed env vars; keys are emitted with AND
+      # without the prefix, values never printed.
+      - name: Prepare helm values
+        env:
+          # test environment has NO vars/secrets (verified via gh api); the
+          # || fallbacks keep the render-time required guards satisfied with
+          # zero secrets. Real values win when the environment is populated.
+          APPFLOW_POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'ci-postgres-password' }}
+          APPFLOW_JWT_SECRET: ${{ secrets.JWT_SECRET || 'ci-jwt-secret-change-me' }}
+          APPFLOW_ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'ci-admin-password' }}
         run: |
-          ENVV=$(jq -n --arg p 'APPFLOW_' 'env | with_entries(select(.key | startswith($p)))')
-          VARS=$(jq -n --arg p 'APPFLOW_' 'env.VARS_JSON | fromjson? // {} |  with_entries(select(.key | startswith($p)))')
-          SECRETS=$(jq -n --arg p 'APPFLOW_' 'env.SECRETS_JSON | fromjson? // {} | with_entries(select(.key | startswith($p)))')
-  
-          jq -n --arg p 'APPFLOW_' --argjson e "$ENVV" --argjson v "$VARS" --argjson s "$SECRETS" \
-          '{env: ($e + $v + $s + ($e + $v + $s | with_entries(.key |= ltrimstr($p))))}' > "${PWD}/env.yaml"
+          jq -n --arg p 'APPFLOW_' \
+            '{env: ((env | with_entries(select(.key | startswith($p)))) as $e | ($e + ($e | with_entries(.key |= ltrimstr($p)))))}' > "${PWD}/env.yaml"
 
-          
-          jq '.env | keys' "${PWD}/env.yaml"
-          
-          cp "${KUBECONFIG}" ".github-ci.kubeconfig"
-          sudo chmod -R o+w $(printf '%s' "$PWD")
-          docker run  --network host -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update '/data'; HELM_DIFF_USE_UPGRADE_DRY_RUN=true /bin/helm diff upgrade 'test' '/data' --namespace '${NAMESPACE}' --values '/data/values.yaml' --values '/data/env.yaml' --kubeconfig /tmp/github-ci.kubeconfig --allow-unreleased"
-      - env:
-          NEWLINE: |2+
-
-          SECRETS_JSON: "${{ toJson(secrets) }}"
-          VARS_JSON: "${{ toJson(vars) }}"
-          APPFLOW_POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          APPFLOW_JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          APPFLOW_ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-        name: Helm Chart deploy
+      - name: Helm Chart preview
         run: |
-          ENVV=$(jq -n --arg p 'APPFLOW_' 'env | with_entries(select(.key | startswith($p)))')
-          VARS=$(jq -n --arg p 'APPFLOW_' 'env.VARS_JSON | fromjson? // {} |  with_entries(select(.key | startswith($p)))')
-          SECRETS=$(jq -n --arg p 'APPFLOW_' 'env.SECRETS_JSON | fromjson? // {} | with_entries(select(.key | startswith($p)))')
-  
-          jq -n --arg p 'APPFLOW_' --argjson e "$ENVV" --argjson v "$VARS" --argjson s "$SECRETS" \
-          '{env: ($e + $v + $s + ($e + $v + $s | with_entries(.key |= ltrimstr($p))))}' > "${PWD}/env.yaml"
-        
           cp "${KUBECONFIG}" ".github-ci.kubeconfig"
-          sudo chmod -R o+w $(printf '%s' "$PWD")
-          docker run  --network host -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update '/data'; HELM_DIFF_USE_UPGRADE_DRY_RUN=true /bin/helm diff upgrade 'test' '/data' --namespace '${NAMESPACE}' --values '/data/values.yaml' --values '/data/env.yaml' --kubeconfig /tmp/github-ci.kubeconfig --allow-unreleased"
+          sudo chmod -R o+w "$PWD"
+          docker run --network host -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update '/data'; HELM_DIFF_USE_UPGRADE_DRY_RUN=true /bin/helm diff upgrade 'gravitee-test' '/data' --namespace '${NAMESPACE}' --values '/data/values.yaml' --values '/data/values-local.yaml' --values '/data/env.yaml' --kubeconfig /tmp/github-ci.kubeconfig --allow-unreleased"
 
+      - name: Helm Chart deploy
+        run: |
+          cp "${KUBECONFIG}" ".github-ci.kubeconfig"
+          sudo chmod -R o+w "$PWD"
+          docker run --network host -v "${PWD}:/data" -w /data ghcr.io/appuio/helm-v4:latest /bin/bash -c "cp .github-ci.kubeconfig /tmp/github-ci.kubeconfig; chmod 400 /tmp/github-ci.kubeconfig; /bin/helm dependency update '/data'; /bin/helm upgrade --install 'gravitee-test' '/data' --namespace '${NAMESPACE}' --create-namespace --timeout 10m --values '/data/values.yaml' --values '/data/values-local.yaml' --values '/data/env.yaml' --kubeconfig /tmp/github-ci.kubeconfig"
 
       - name: Validate deployment
         run: |
-          kubectl wait --for=condition=available deployment -l app.kubernetes.io/instance=gravitee-test -n "${NAMESPACE}" --timeout=300s
+          # 600s: first-run image pulls + liquibase schema init + init-job hook
+          kubectl wait --for=condition=available deployment -l app.kubernetes.io/instance=gravitee-test -n "${NAMESPACE}" --timeout=600s
           kubectl get pods -n "${NAMESPACE}"
           kubectl get svc -n "${NAMESPACE}"
 
@@ -80,5 +70,5 @@ name: Build and deploy to test
 "on":
   push:
     branches:
-      - '**'
+      - "**"
   workflow_dispatch: {}
